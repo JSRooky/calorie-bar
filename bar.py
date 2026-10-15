@@ -29,6 +29,7 @@ GOOD = (46, 150, 70)
 BAD = (196, 48, 42)
 WIDTH = 460
 HEIGHT = 52
+GLOW_PAD = 18
 FONT_PATH = Path(r"C:\Windows\Fonts\segoeuib.ttf")
 
 
@@ -174,13 +175,14 @@ class CalorieBar:
         self._leaving = ""
         self._entering = ""
         self._drag_origin = (0, 0)
+        self._pulsing = False
         self._close_icon = Image.open(io.BytesIO(base64.b64decode(_close_png(_asset("closeb.svg"), 64)))).resize((30, 30), Image.Resampling.LANCZOS)
         self._font = ImageFont.truetype(str(FONT_PATH), 14)
 
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
-        self.root.geometry(f"{WIDTH}x{HEIGHT}+80+80")
+        self.root.geometry(f"{WIDTH + 2 * GLOW_PAD}x{HEIGHT + 2 * GLOW_PAD}+{80 - GLOW_PAD}+{80 - GLOW_PAD}")
         self.root.bind("<ButtonPress-1>", self._press)
         self.root.bind("<B1-Motion>", self._drag)
         self.root.bind("<Motion>", self._hover)
@@ -245,6 +247,7 @@ class CalorieBar:
         self._samples.append((now, self.current))
         self._samples = [(stamp, value) for stamp, value in self._samples if now - stamp <= 30]
         self._redraw()
+        self._sync_pulse()
 
     def note_power(self, watts: float) -> None:
         now = time.monotonic()
@@ -377,6 +380,23 @@ class CalorieBar:
         self._editor = None
         editor.destroy()
         self._redraw()
+        self._sync_pulse()
+
+    def _sync_pulse(self) -> None:
+        reached = self.current >= self.target
+        if reached and not self._pulsing:
+            self._pulsing = True
+            self.root.after(50, self._pulse)
+            return
+        if not reached:
+            self._pulsing = False
+
+    def _pulse(self) -> None:
+        if not self._pulsing or self.current < self.target:
+            self._pulsing = False
+            return
+        self._redraw()
+        self.root.after(50, self._pulse)
 
 
 def _slot_text(index: int, remaining: float, kcal_per_second: float | None, power: list[tuple[float, float]]) -> str:
@@ -531,7 +551,8 @@ def _render_bar(
     icon_x = WIDTH - HEIGHT // 2 - close_icon.width // 2
     icon_y = (HEIGHT - close_icon.height) // 2
     image.alpha_composite(close_icon, (icon_x, icon_y))
-    return image, (target_left, text_top, target_width, ascent + descent)
+    image = _with_glow(image, current >= target)
+    return image, (target_left + GLOW_PAD, text_top + GLOW_PAD, target_width, ascent + descent)
 
 
 def _arrow_font() -> ImageFont.FreeTypeFont:
@@ -610,9 +631,42 @@ def _draw_scroll(image: Image.Image, font: ImageFont.FreeTypeFont, leaving: tupl
     image.paste(Image.composite(layer, strip, band), (left, 0))
 
 
+def _glow_phase() -> float:
+    return 0.5 + 0.5 * math.sin(time.monotonic() * 2.2)
+
+
+def _with_glow(pill: Image.Image, active: bool) -> Image.Image:
+    """Keep a constant margin so the bar does not jump when the halo appears."""
+    canvas = Image.new("RGBA", (WIDTH + 2 * GLOW_PAD, HEIGHT + 2 * GLOW_PAD), (0, 0, 0, 0))
+    if active:
+        phase = _glow_phase()
+        scale = 3
+        big_w = canvas.width * scale
+        big_h = canvas.height * scale
+        mask = Image.new("L", (big_w, big_h), 0)
+        draw = ImageDraw.Draw(mask)
+        peak = 0.45 + 0.55 * phase
+        for distance in range(GLOW_PAD, 0, -1):
+            closeness = 1 - (distance - 1) / GLOW_PAD
+            alpha = int(100 * peak * closeness ** 1.5)
+            inset = (GLOW_PAD - distance) * scale
+            radius = (HEIGHT // 2 + distance) * scale
+            draw.rounded_rectangle(
+                (inset, inset, big_w - 1 - inset, big_h - 1 - inset),
+                radius=radius,
+                fill=alpha,
+            )
+        color = (186, 235, 120)
+        halo = Image.new("RGBA", (big_w, big_h), color + (0,))
+        halo.putalpha(mask)
+        canvas.alpha_composite(halo.resize(canvas.size, Image.Resampling.LANCZOS))
+    canvas.alpha_composite(pill, (GLOW_PAD, GLOW_PAD))
+    return canvas
+
+
 def _hit_close(x: int, y: int) -> bool:
-    cx = WIDTH - HEIGHT // 2
-    cy = HEIGHT // 2
+    cx = GLOW_PAD + WIDTH - HEIGHT // 2
+    cy = GLOW_PAD + HEIGHT // 2
     return (x - cx) ** 2 + (y - cy) ** 2 <= 16 ** 2
 
 
