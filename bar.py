@@ -12,6 +12,7 @@ import math
 import re
 import struct
 import sys
+import threading
 import time
 import tkinter as tk
 import zlib
@@ -19,6 +20,8 @@ from ctypes import wintypes
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+from listen import AntSession
 
 
 ORANGE = (255, 152, 0)
@@ -36,7 +39,8 @@ FONT_PATH = Path(r"C:\Windows\Fonts\segoeuib.ttf")
 def _asset(name: str) -> Path:
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return root / name
-LINK_HOLD_SECONDS = 120
+# 10 seconds while running from source, 60 seconds in the packaged build.
+LINK_HOLD_SECONDS = 60 if getattr(sys, "frozen", False) else 10
 LINK_OFF = "off"
 LINK_SEARCHING = "searching"
 LINK_ON = "on"
@@ -170,6 +174,8 @@ class CalorieBar:
         self._samples: list[tuple[float, float]] = []
         self._link = LINK_SEARCHING
         self._linked_at = 0.0
+        self._last_power_at: float | None = None
+        self._ant = AntSession()
         self._slot = 0
         self._scroll = None
         self._leaving = ""
@@ -188,9 +194,10 @@ class CalorieBar:
         self.root.bind("<Motion>", self._hover)
         self._redraw()
         self._animate()
+        self._ant.start(self._ant_link, self._ant_watts)
 
     def set_link(self, state: str) -> None:
-        """off, searching, or on. The green mark yields to the time estimate after two minutes."""
+        """off, searching, or on. The green mark yields to the time estimate after LINK_HOLD_SECONDS."""
         self._link = state
         if state == LINK_ON:
             self._linked_at = time.monotonic()
@@ -260,7 +267,32 @@ class CalorieBar:
         self.set_kcal(self.current + kcal)
 
     def mainloop(self) -> None:
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            self._ant.stop()
+
+    def _ant_link(self, state: str) -> None:
+        try:
+            self.root.after(0, lambda: self.set_link(state))
+        except tk.TclError:
+            pass
+
+    def _ant_watts(self, watts: float) -> None:
+        try:
+            self.root.after(0, lambda: self._apply_watts(watts))
+        except tk.TclError:
+            pass
+
+    def _apply_watts(self, watts: float) -> None:
+        now = time.monotonic()
+        previous = self._last_power_at
+        self._last_power_at = now
+        if previous is not None:
+            elapsed = now - previous
+            if 0 < elapsed < 5:
+                self.add_kcal(max(0.0, watts) * elapsed / 4184)
+        self.note_power(watts)
 
     def _redraw(self) -> None:
         fraction = min(1.0, self.current / self.target)
